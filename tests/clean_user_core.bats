@@ -549,6 +549,67 @@ EOF
     [[ "$output" != *"osascript called"* ]]
 }
 
+@test "clean_trash reports skipped items instead of silent partial empty (#1517)" {
+    mkdir -p "$HOME/.Trash"
+    touch "$HOME/.Trash/one.tmp" "$HOME/.Trash/two.tmp"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+DRY_RUN=false
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+start_inline_spinner() { :; }
+stop_inline_spinner() { :; }
+note_activity() { :; }
+is_path_whitelisted() { return 1; }
+debug_log() { :; }
+safe_remove() {
+    local target="$1"
+    [[ "$target" == *"/two.tmp" ]] && return 1
+    rm -f "$target"
+    return 0
+}
+
+clean_trash
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Trash · removed 1 items, 1 skipped"* ]] || return 1
+    [[ -e "$HOME/.Trash/two.tmp" ]]
+    [[ ! -e "$HOME/.Trash/one.tmp" ]]
+}
+
+@test "clean_trash removes input-method leftovers already in Trash (#1517)" {
+    rm -rf "$HOME/.Trash" # SAFE: reset this test's temporary HOME fixture before populating it
+    mkdir -p "$HOME/.Trash/Input Methods"
+    touch "$HOME/.Trash/com.sogou.inputmethod.sogou.plist"
+    touch "$HOME/.Trash/com.tencent.inputmethod.QQInput.plist"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+DRY_RUN=false
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+start_inline_spinner() { :; }
+stop_inline_spinner() { :; }
+note_activity() { :; }
+is_path_whitelisted() { return 1; }
+debug_log() { :; }
+
+clean_trash
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Trash · emptied, 3 items"* ]] || return 1
+    [[ ! -e "$HOME/.Trash/com.sogou.inputmethod.sogou.plist" ]]
+    [[ ! -e "$HOME/.Trash/com.tencent.inputmethod.QQInput.plist" ]]
+    [[ ! -d "$HOME/.Trash/Input Methods" ]]
+}
+
 @test "clean_user_essentials keeps Mole runtime logs while cleaning other user logs" {
     mkdir -p "$HOME/Library/Logs/mole"
     mkdir -p "$HOME/Library/Logs/OtherApp"
@@ -640,6 +701,27 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" != *"Autosave information"* ]] || return 1
     [[ "$output" != *"Library/Autosave Information"* ]]
+}
+
+@test "clean_app_caches does not clean Calendar cache (#1508)" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+stop_section_spinner() { :; }
+start_section_spinner() { :; }
+safe_clean() { echo "$2|$1"; }
+bytes_to_human() { echo "0B"; }
+note_activity() { :; }
+files_cleaned=0
+total_size_cleaned=0
+total_items=0
+clean_app_caches
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"Calendar cache"* ]] || return 1
+    [[ "$output" != *"Library/Calendars/Calendar Cache"* ]]
 }
 
 @test "clean_app_caches includes additional Apple cache families" {

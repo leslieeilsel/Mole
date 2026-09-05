@@ -1808,10 +1808,22 @@ clean_xcode_xctest_devices() {
         return 0
     fi
 
+    # Test clones accumulate one UUID directory per test run, so the root
+    # grows without bound and a single-tree removal can exceed the per-item
+    # removal budget after deleting only part of it. Delete each entry
+    # separately so the budget, sink guard, and sizing apply per clone. The
+    # root itself stays: Xcode recreates clones inside it.
+    local -a device_entries=()
+    local device_entry
+    while IFS= read -r -d '' device_entry; do
+        device_entries+=("$device_entry")
+    done < <(command find "$xctest_devices_dir" -mindepth 1 -maxdepth 1 -print0 2> /dev/null)
+    [[ ${#device_entries[@]} -gt 0 ]] || return 0
+
     _xcode_safe_clean_guarded \
         _xctest_devices_delete_guard_allows \
         "Xcode XCTestDevices" \
-        "$xctest_devices_dir" \
+        "${device_entries[@]}" \
         "Xcode XCTestDevices test data" || true
 }
 
@@ -2735,6 +2747,134 @@ _debug_simctl_probe_stderr() {
     debug_log "simctl probe $attempt stderr: $excerpt"
 }
 
+# Installed simulator runtimes that no device uses. Distinct from
+# clean_xcode_simulator_runtime_volumes (stale mount points) and from
+# unavailable-simulator cleanup (devices orphaned by a removed runtime):
+# this is the inverse, a runtime left behind after its last device went
+# away. Nothing in macOS or Xcode reports it, so an 8GB download can sit
+# unreferenced indefinitely.
+#
+# Review-only by design. A runtime is a toolchain payload that only Apple
+# can serve again, so it stays off the blanket delete path the same way
+# other downloaded toolchain roots do; the value here is naming the exact
+# orphan and the owner command, which is information the user cannot get
+# from simctl directly.
+#
+# The join keys on runtimeIdentifier from `-j` output, never on the printed
+# runtime name. The two human-readable listings disagree by design: `runtime
+# list` heads each image with the image version ("iOS 26.4.1") while `list
+# devices` groups under the runtime's short name ("iOS 26.4"), so a name join
+# calls every point release an orphan and tells the user to delete a runtime
+# its simulators are still bound to.
+
+# One tab-separated row per orphaned runtime image: id, platform, version,
+# build, sizeBytes. Reads both `-j` payloads in a single awk pass, devices
+# first, then joins on runtimeIdentifier.
+#
+# A row survives only on complete evidence. The image must be Ready and
+# deletable, so nothing mid-download or owned by Xcode itself is offered. Its
+# runtime identifier must be served by exactly one installed image, because
+# the device list keys on the identifier and cannot say which of two images
+# the devices belong to. And udid entries are counted rather than trusting how
+# an empty array happens to be rendered.
+_simctl_orphan_runtime_rows() {
+    printf '%s\n=== MOLE RUNTIME PAYLOAD ===\n%s\n' "$1" "$2" | awk '
+        function val(line,   v) {
+            v = line
+            sub(/^ *"[^"]+" *: */, "", v)
+            sub(/,$/, "", v)
+            gsub(/^"|"$/, "", v)
+            return v
+        }
+        function key(line,   k) {
+            k = line
+            sub(/^ *"/, "", k)
+            sub(/" *:.*$/, "", k)
+            return k
+        }
+        function flush_device_group() {
+            if (group != "" && members > 0) used[group] = 1
+            group = ""
+            members = 0
+        }
+        function flush_runtime_image() {
+            if (id == "" || rid == "") return
+            n++
+            r_id[n] = id
+            r_rid[n] = rid
+            r_ver[n] = ver
+            r_build[n] = build
+            r_size[n] = size
+            r_del[n] = del
+            r_state[n] = state
+            served[rid]++
+            id = ""; rid = ""; ver = ""; build = ""; size = ""; del = ""; state = ""
+        }
+        /^=== MOLE RUNTIME PAYLOAD ===$/ { flush_device_group(); phase = 2; next }
+        phase != 2 {
+            if (!in_devices) { if ($0 ~ /^  "devices" *:/) in_devices = 1; next }
+            if ($0 ~ /^    "/) { flush_device_group(); group = key($0); next }
+            if ($0 ~ /^  \}/) { flush_device_group(); in_devices = 0; next }
+            if ($0 ~ /"udid"/) members++
+            next
+        }
+        /^  "[^"]+" *: *\{/ { flush_runtime_image(); id = key($0); next }
+        /^    "runtimeIdentifier" *:/ { rid = val($0); next }
+        /^    "version" *:/ { ver = val($0); next }
+        /^    "build" *:/ { build = val($0); next }
+        /^    "sizeBytes" *:/ { size = val($0); next }
+        /^    "deletable" *:/ { del = val($0); next }
+        /^    "state" *:/ { state = val($0); next }
+        END {
+            flush_runtime_image()
+            for (i = 1; i <= n; i++) {
+                if (r_state[i] != "Ready" || r_del[i] != "true") continue
+                if (served[r_rid[i]] != 1) continue
+                if (r_rid[i] in used) continue
+                platform = r_rid[i]
+                sub(/^.*\./, "", platform)
+                sub(/-.*$/, "", platform)
+                if (platform == "") platform = "Simulator"
+                printf "%s\t%s\t%s\t%s\t%s\n", r_id[i], platform, r_ver[i], r_build[i], r_size[i]
+            }
+        }'
+}
+
+check_orphaned_simulator_runtimes() {
+    command -v xcrun > /dev/null 2>&1 || return 0
+    [[ "${_MOLE_SIMCTL_RESOLUTION_STATUS:-}" == "ready" ]] || return 0
+
+    local runtime_json="" device_json="" probe_status=0
+    runtime_json=$(_run_simctl "$MOLE_TIMEOUT_PKG_LIST_SEC" runtime list -j 2> /dev/null) || probe_status=$?
+    if [[ $probe_status -ne 0 ]]; then
+        [[ $probe_status -eq 124 || $probe_status -ge 128 ]] && return "$probe_status"
+        debug_log "Orphaned runtime probe failed (exit=$probe_status)"
+        return 0
+    fi
+
+    probe_status=0
+    device_json=$(_run_simctl "$MOLE_TIMEOUT_PKG_LIST_SEC" list devices -j 2> /dev/null) || probe_status=$?
+    if [[ $probe_status -ne 0 ]]; then
+        [[ $probe_status -eq 124 || $probe_status -ge 128 ]] && return "$probe_status"
+        debug_log "Orphaned runtime device probe failed (exit=$probe_status)"
+        return 0
+    fi
+    # Without a recognizable device payload there is no evidence of absence,
+    # only absence of evidence.
+    [[ "$device_json" == *'"devices"'* ]] || return 0
+
+    local id platform version build size_bytes size_note build_note
+    while IFS=$'\t' read -r id platform version build size_bytes; do
+        [[ -n "$id" && -n "$platform" ]] || continue
+        size_note=""
+        [[ "$size_bytes" =~ ^[0-9]+$ ]] && size_note=", $(bytes_to_human "$size_bytes")"
+        build_note="${build:+ ($build)}"
+        echo -e "  ${GRAY}${ICON_REVIEW}${NC} Orphaned simulator runtime · ${platform} ${version}${build_note}${size_note} · no devices · remove with ${GRAY}xcrun simctl runtime delete ${id}${NC}"
+        note_activity
+    done < <(_simctl_orphan_runtime_rows "$device_json" "$runtime_json")
+    return 0
+}
+
 clean_dev_mobile() {
     check_android_ndk
     clean_xcode_documentation_cache || return $?
@@ -2946,6 +3086,7 @@ clean_dev_mobile() {
             echo -e "  ${GRAY}${ICON_WARNING}${NC} Xcode unavailable simulators · simctl could not be resolved"
             note_activity
         fi
+        check_orphaned_simulator_runtimes || return $?
     fi
     # Old iOS/watchOS/tvOS DeviceSupport versions (debug symbols for connected devices).
     # Each iOS version creates a 1-3 GB folder of debug symbols. Only the versions
@@ -3816,6 +3957,140 @@ clean_claude_desktop_bundled_versions() {
             "$label" || clean_rc=$?
         [[ $clean_rc -eq 0 || $clean_rc -eq 1 ]] || return "$clean_rc"
     done
+}
+
+# Headless browser trees leaked by dead Playwright/agent automation sessions.
+# When an MCP server or agent harness dies without cleanup, its browser
+# daemons reparent to launchd (ppid 1) and the Chrome tree keeps running
+# headless, holding RSS; the ephemeral temp profiles keep disk.
+#
+# Only processes tied to playwright_chromiumdev_profile-* automation profiles
+# are ever touched, never a user's real browser, and the evidence of a leak is
+# ppid 1: the harness that owned this browser is gone. That is a fact about
+# the session rather than a guess from age, so it protects a live automation
+# run of any length (its parent is still alive) while catching a leak minutes
+# after it happens instead of a day later. The one-hour floor only keeps the
+# scan away from a browser that is mid-handoff between two parents.
+#
+# Chrome helper processes keep the main browser as their parent, so this
+# matches roots only and the tree follows them down.
+_automation_browser_process_records() {
+    local wanted_pid="${1:-}"
+    awk -v wanted_pid="$wanted_pid" '
+        NF < 9 { next }
+        $1 !~ /^[0-9]+$/ { next }
+        wanted_pid != "" && $1 != wanted_pid { next }
+        $2 != 1 { next }
+        # ps prints mm:ss below an hour and hh:mm:ss or dd-hh:mm:ss above it.
+        $3 !~ /-/ && $3 !~ /^[0-9]+:[0-9][0-9]:[0-9][0-9]$/ { next }
+        {
+            command = $9
+            for (i = 10; i <= NF; i++) command = command " " $i
+        }
+        command ~ /playwright-core\/lib\/entry\/cliDaemon\.js/ ||
+            command ~ /playwright_chromiumdev_profile/ {
+            print $1 "|" $4 " " $5 " " $6 " " $7 " " $8
+        }'
+}
+
+_automation_browser_process_matches_record() {
+    local pid="$1"
+    local expected_start="$2"
+    [[ "$pid" =~ ^[0-9]+$ && -n "$expected_start" ]] || return 1
+
+    local process_row=""
+    local ps_rc=0
+    process_row=$(LC_ALL=C run_with_timeout "$MOLE_TIMEOUT_QUICK_DETECT_SEC" \
+        ps -p "$pid" -o pid=,ppid=,etime=,lstart=,command= -ww 2> /dev/null) || ps_rc=$?
+    [[ $ps_rc -eq 0 ]] || return "$ps_rc"
+
+    local current_record=""
+    current_record=$(printf '%s\n' "$process_row" |
+        _automation_browser_process_records "$pid") || return 1
+    [[ "$current_record" == "$pid|$expected_start" ]]
+}
+
+clean_dev_automation_browsers() {
+    local -a leaked_processes=()
+    local process_rows=""
+    local ps_rc=0
+    process_rows=$(LC_ALL=C run_with_timeout "$MOLE_TIMEOUT_QUICK_DETECT_SEC" \
+        ps -Ao pid=,ppid=,etime=,lstart=,command= -ww 2> /dev/null) || ps_rc=$?
+    if [[ $ps_rc -eq 124 || $ps_rc -ge 128 ]]; then
+        return "$ps_rc"
+    elif [[ $ps_rc -eq 0 ]]; then
+        local process_record
+        while IFS= read -r process_record; do
+            [[ -n "$process_record" ]] && leaked_processes+=("$process_record")
+        done < <(printf '%s\n' "$process_rows" | _automation_browser_process_records | sort -n)
+    fi
+
+    # Ephemeral automation profiles: stale after 2h, and never one that a
+    # live process still references.
+    local -a stale_profiles=()
+    local tmpdir
+    tmpdir=$(getconf DARWIN_USER_TEMP_DIR 2> /dev/null) || tmpdir=""
+    if [[ -n "$tmpdir" ]]; then
+        local d now age_hours
+        now=$(date +%s)
+        for d in "$tmpdir"playwright_chromiumdev_profile-*; do
+            [[ -d "$d" ]] || continue
+            age_hours=$(((now - $(stat -f %m "$d" 2> /dev/null || echo "$now")) / 3600))
+            [[ "$age_hours" -ge 2 ]] || continue
+            pgrep -qf "$d" 2> /dev/null && continue
+            stale_profiles+=("$d")
+        done
+    fi
+
+    if [[ ${#leaked_processes[@]} -gt 0 ]]; then
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo -e "  ${YELLOW}${ICON_DRY_RUN}${NC} Leaked automation browsers · would stop ${#leaked_processes[@]} processes ${YELLOW}dry${NC}"
+        else
+            local stopped=0
+            local -a term_processes=()
+            local pid expected_start match_rc
+            for process_record in "${leaked_processes[@]}"; do
+                pid="${process_record%%|*}"
+                expected_start="${process_record#*|}"
+                match_rc=0
+                _automation_browser_process_matches_record \
+                    "$pid" "$expected_start" || match_rc=$?
+                if [[ $match_rc -eq 124 || $match_rc -ge 128 ]]; then
+                    return "$match_rc"
+                elif [[ $match_rc -ne 0 ]]; then
+                    continue
+                fi
+                if kill -TERM "$pid" 2> /dev/null; then
+                    stopped=$((stopped + 1))
+                    term_processes+=("$process_record")
+                fi
+            done
+            if [[ ${#term_processes[@]} -gt 0 ]]; then
+                sleep 1
+                # Escalate only when the same process still owns the PID and
+                # still has the orphaned automation-browser evidence.
+                for process_record in "${term_processes[@]}"; do
+                    pid="${process_record%%|*}"
+                    expected_start="${process_record#*|}"
+                    match_rc=0
+                    _automation_browser_process_matches_record \
+                        "$pid" "$expected_start" || match_rc=$?
+                    if [[ $match_rc -eq 124 || $match_rc -ge 128 ]]; then
+                        return "$match_rc"
+                    elif [[ $match_rc -eq 0 ]]; then
+                        kill -9 "$pid" 2> /dev/null || true
+                    fi
+                done
+            fi
+            echo -e "  ${GREEN}${ICON_SUCCESS}${NC} Leaked automation browsers · stopped ${stopped} processes"
+        fi
+        note_activity
+    fi
+
+    if [[ ${#stale_profiles[@]} -gt 0 ]]; then
+        safe_clean "${stale_profiles[@]}" "Leaked browser profiles" || return $?
+    fi
+    return 0
 }
 
 clean_dev_ai_agents() {
@@ -5308,6 +5583,7 @@ clean_developer_tools() {
     _run_developer_cleanup_step clean_dev_jetbrains_toolbox || return $?
     _run_developer_cleanup_step clean_dev_jetbrains_logs || return $?
     _run_developer_cleanup_step --strict clean_dev_ai_agents || return $?
+    _run_developer_cleanup_step clean_dev_automation_browsers || return $?
     _run_developer_cleanup_step clean_dev_other_langs || return $?
     _run_developer_cleanup_step clean_dev_cicd || return $?
     _run_developer_cleanup_step clean_dev_database || return $?

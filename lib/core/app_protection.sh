@@ -505,7 +505,7 @@ should_protect_path() {
         */Library/Accounts | */Library/Accounts/* | \
             */Library/Keychains | */Library/Keychains/* | \
             */Library/Mail | */Library/Mail/* | \
-            */Library/Calendars | \
+            */Library/Calendars | */Library/Calendars/* | \
             */Library/Contacts | */Library/Contacts/*)
             return 0
             ;;

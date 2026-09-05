@@ -144,6 +144,21 @@ teardown() {
     [ "$status" -eq 0 ]
 }
 
+@test "validate_path_for_deletion allows protected input-method names in Trash (#1517)" {
+    mkdir -p "$HOME/.Trash"
+    touch "$HOME/.Trash/com.sogou.inputmethod.sogou.plist"
+    touch "$HOME/.Trash/com.tencent.inputmethod.QQInput.plist"
+
+    run /bin/bash -c "source '$PROJECT_ROOT/lib/core/common.sh'; validate_path_for_deletion '$HOME/.Trash/com.sogou.inputmethod.sogou.plist'"
+    [ "$status" -eq 0 ]
+
+    run /bin/bash -c "source '$PROJECT_ROOT/lib/core/common.sh'; validate_path_for_deletion '$HOME/.Trash/com.tencent.inputmethod.QQInput.plist'"
+    [ "$status" -eq 0 ]
+
+    run /bin/bash -c "source '$PROJECT_ROOT/lib/core/common.sh'; validate_path_for_deletion '$HOME/Library/Preferences/com.sogou.inputmethod.sogou.plist'"
+    [ "$status" -eq 1 ]
+}
+
 @test "validate_path_for_deletion rejects temp roots while allowing their children" {
     run /bin/bash -c "source '$PROJECT_ROOT/lib/core/common.sh'; validate_path_for_deletion '/private/tmp'"
     [ "$status" -eq 1 ]

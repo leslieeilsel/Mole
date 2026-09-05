@@ -2472,6 +2472,108 @@ EOF
     [ "$status" -eq 0 ]
 }
 
+# A bundle whose folder name is not its product name reaches the user as an
+# unrecognizable string: #1520 reported almost uninstalling CapCut because Mole
+# listed it as "VideoFusion-macOS" while Finder showed the Chinese name. The
+# name Finder shows comes from Contents/Resources/<lang>.lproj/InfoPlist.strings.
+_write_display_name_fixture() {
+    local app_path="$1" dev_region="$2" base_name="$3"
+    shift 3
+
+    mkdir -p "$app_path/Contents/Resources"
+    cat > "$app_path/Contents/Info.plist" << PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>com.example.fixture</string>
+<key>CFBundleDevelopmentRegion</key><string>$dev_region</string>
+<key>CFBundleDisplayName</key><string>$base_name</string>
+<key>CFBundleName</key><string>$base_name</string>
+</dict></plist>
+PLIST
+
+    local spec lproj value
+    for spec in "$@"; do
+        lproj="${spec%%=*}"
+        value="${spec#*=}"
+        mkdir -p "$app_path/Contents/Resources/$lproj.lproj"
+        if [[ "$value" != "-" ]]; then
+            printf '"CFBundleDisplayName" = "%s";\n' "$value" \
+                > "$app_path/Contents/Resources/$lproj.lproj/InfoPlist.strings"
+        fi
+    done
+}
+
+_run_display_name_case() {
+    local languages="$1" app_path="$2" app_name="$3"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" LANGS="$languages" \
+        APP_PATH="$app_path" APP_NAME="$app_name" \
+        /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+
+# mdls only ever reports the on-disk file name for an app bundle, which is the
+# string this behavior exists to replace. Stub it so the case cannot pass by
+# accidentally agreeing with Spotlight.
+run_with_timeout() {
+    shift
+    "$@"
+}
+mdls() { printf '%s\n' "$(basename "$APP_PATH")"; }
+
+for _fn in _uninstall_lproj_candidates _uninstall_localized_bundle_name uninstall_resolve_display_name; do
+    eval "$(sed -n "/^${_fn}()/,/^}/p" "$PROJECT_ROOT/bin/uninstall.sh")"
+done
+
+MOLE_UNINSTALL_USER_LC_ALL=""
+MOLE_UNINSTALL_USER_LANG=""
+MOLE_UNINSTALL_INLINE_MDLS_DISPLAY_TIMEOUT_SEC=3
+MOLE_UNINSTALL_PREFERRED_LANGS="$LANGS"
+
+uninstall_resolve_display_name "$APP_PATH" "$APP_NAME"
+EOF
+}
+
+@test "uninstall_resolve_display_name uses the bundle's localized name for the user's language (#1520)" {
+    local app_path="$HOME/Applications/VideoFusion-macOS.app"
+    _write_display_name_fixture "$app_path" "en" "VideoFusion-macOS" \
+        "en=VideoFusion" "zh-Hans=剪映专业版"
+
+    _run_display_name_case "$(printf 'zh-Hans-CN\nen-CN')" "$app_path" "VideoFusion-macOS.app"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$output" = "剪映专业版" ] || { echo "$output"; return 1; }
+
+    _run_display_name_case "$(printf 'en-CN\nzh-Hans-CN')" "$app_path" "VideoFusion-macOS.app"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$output" = "VideoFusion" ] || { echo "$output"; return 1; }
+}
+
+# The stop condition matters as much as the lookup. MiaoYan.app ships a Chinese
+# override and no English one, so a search that kept walking the preference list
+# would show a Chinese name to a user who asked for English.
+@test "uninstall_resolve_display_name never falls through to an unrequested language (#1520)" {
+    local app_path="$HOME/Applications/MiaoYan.app"
+    _write_display_name_fixture "$app_path" "en" "MiaoYan" "Base=-" "zh-Hans=妙言"
+
+    _run_display_name_case "$(printf 'en-CN\nzh-Hans-CN')" "$app_path" "MiaoYan.app"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$output" = "MiaoYan" ] || { echo "$output"; return 1; }
+
+    _run_display_name_case "$(printf 'zh-Hans-CN\nen-CN')" "$app_path" "MiaoYan.app"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$output" = "妙言" ] || { echo "$output"; return 1; }
+}
+
+@test "uninstall_resolve_display_name keeps the unlocalized name without a language list (#1520)" {
+    local app_path="$HOME/Applications/NoPrefs.app"
+    _write_display_name_fixture "$app_path" "en" "NoPrefs Base" "zh-Hans=中文名"
+
+    _run_display_name_case "" "$app_path" "NoPrefs.app"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$output" = "NoPrefs Base" ] || { echo "$output"; return 1; }
+}
+
 @test "uninstall_resolve_display_name keeps versioned app names when metadata is generic" {
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
@@ -2497,7 +2599,10 @@ function plutil() {
 MOLE_UNINSTALL_USER_LC_ALL=""
 MOLE_UNINSTALL_USER_LANG=""
 
-eval "$(sed -n '/^uninstall_resolve_display_name()/,/^}/p' "$PROJECT_ROOT/bin/uninstall.sh")"
+for _fn in _uninstall_lproj_candidates _uninstall_localized_bundle_name uninstall_resolve_display_name; do
+    eval "$(sed -n "/^${_fn}()/,/^}/p" "$PROJECT_ROOT/bin/uninstall.sh")"
+done
+MOLE_UNINSTALL_PREFERRED_LANGS="${MOLE_UNINSTALL_PREFERRED_LANGS:-}"
 
 app_path="$HOME/Applications/Xcode 16.4.app"
 mkdir -p "$app_path/Contents"
@@ -3271,6 +3376,62 @@ INNER
 
     rm -f "$first_cache"
     [ "$status" -eq 0 ]
+}
+
+@test "completed uninstall suppresses dead-terminal countdown read errors (#1503)" {
+    local apps_cache
+    apps_cache="$(mktemp "${BATS_TEST_TMPDIR:-$BATS_RUN_TMPDIR:-$HOME}/tmp-1503-countdown.XXXXXX")"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" APPS_CACHE_FILE="$apps_cache" \
+        /bin/bash --noprofile --norc << 'INNER'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+
+log_operation_session_start() { :; }
+hide_cursor() { :; }
+show_cursor() { :; }
+clear_screen() { :; }
+start_uninstall_interactive_screen() { :; }
+stop_uninstall_interactive_screen() { :; }
+scan_applications() { printf '%s\n' "$APPS_CACHE_FILE"; }
+load_applications() { :; }
+select_apps_for_uninstall() {
+    selected_apps=("0|$HOME/Applications/TestApp.app|TestApp|com.example.TestApp|1KB|Today|1")
+}
+batch_uninstall_applications() { :; }
+uninstall_app_inventory_fingerprint() { printf 'stable\n'; }
+uninstall_normalize_size_display() { printf '%s\n' "$1"; }
+uninstall_normalize_last_used_display() { printf '%s\n' "$1"; }
+get_display_width() { printf '%s\n' "${#1}"; }
+truncate_by_display_width() { printf '%s\n' "$1"; }
+mole_tty_is_foreground() { return 0; }
+drain_pending_input() { :; }
+read() {
+    local arg
+    for arg in "$@"; do
+        if [[ "$arg" == -t || "$arg" == -t* ]]; then
+            printf 'read error: 0: Input/output error\n' >&2
+            return 1
+        fi
+    done
+    builtin read "$@"
+}
+
+eval "$(sed -n '/^main()/,/main \"\$@\"/p' "$PROJECT_ROOT/bin/uninstall.sh" | sed '$d')"
+main > "$HOME/countdown.out" 2> "$HOME/countdown.err"
+
+[[ "$(cat "$HOME/countdown.err")" != *'Input/output error'* ]] || {
+    cat "$HOME/countdown.err" >&2
+    exit 1
+}
+[[ "$(grep -o 'Press Enter to return to the app list' "$HOME/countdown.out" | wc -l | tr -d ' ')" -eq 5 ]]
+INNER
+
+    rm -f "$apps_cache"
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
 }
 
 @test "inventory cache reuse accepts removals only and rejects stale changes (#1315)" {

@@ -868,12 +868,75 @@ SCRIPT
     [[ "$output" == *"SYSTEM_CLEAN=false"* ]]
 }
 
-@test "cloud and office timeout path uses helper function instead of bash -c" {
-    run /bin/bash -c "grep -Eq 'run_with_shell_timeout 300 run_cloud_and_office_cleanup' '$PROJECT_ROOT/bin/clean.sh'"
+@test "cloud and office cleanup uses cooperative section budget instead of outer killer" {
+    run /bin/bash -c "grep -Eq 'MOLE_CLOUD_OFFICE_SECTION_BUDGET_SEC' '$PROJECT_ROOT/lib/core/timeouts.sh'"
+    [ "$status" -eq 0 ]
+
+    run /bin/bash -c "! grep -Eq 'run_with_shell_timeout 300 run_cloud_and_office_cleanup' '$PROJECT_ROOT/bin/clean.sh'"
+    [ "$status" -eq 0 ]
+
+    run /bin/bash -c "grep -Eq '_run_cleanup_step run_cloud_and_office_cleanup' '$PROJECT_ROOT/bin/clean.sh'"
     [ "$status" -eq 0 ]
 
     run /bin/bash -c "! grep -Eq 'run_with_timeout 300[[:space:]]+bash[[:space:]]+-c' '$PROJECT_ROOT/bin/clean.sh'"
     [ "$status" -eq 0 ]
+}
+
+@test "cloud and office section budget continues later cleanup sections (#1513)" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_MODE=0 \
+        MOLE_CLOUD_OFFICE_SECTION_BUDGET_SEC=0 MOLE_TEST_NO_AUTH=1 \
+        /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/bin/clean.sh"
+
+DRY_RUN=false
+SYSTEM_CLEAN=false
+EXTERNAL_VOLUME_TARGET=""
+WHITELIST_PATTERNS=()
+WHITELIST_WARNINGS=()
+
+check_tcc_permissions() { :; }
+start_section() { :; }
+end_section() { :; }
+log_operation_session_end() { :; }
+clean_user_essentials() { :; }
+clean_finder_metadata() { :; }
+clean_app_caches() { :; }
+clean_browsers() { :; }
+clean_cloud_storage() { :; }
+clean_office_applications() { echo "OFFICE_SHOULD_NOT_RUN"; return 0; }
+clean_user_gui_applications() { :; }
+clean_virtualization_tools() { :; }
+clean_application_support_logs() { :; }
+clean_orphaned_app_data() { :; }
+clean_orphaned_system_services() { :; }
+clean_orphaned_container_stubs() { :; }
+show_user_launch_agent_hint_notice() { :; }
+clean_apple_silicon_caches() { :; }
+clean_cached_device_firmware() { :; }
+clean_time_machine_failed_backups() { :; }
+check_large_file_candidates() { :; }
+show_project_artifact_hint_notice() { :; }
+
+developer_tools_called=false
+clean_developer_tools() {
+    developer_tools_called=true
+    return 0
+}
+
+perform_cleanup
+printf 'DEV=%s\n' "$developer_tools_called"
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" == *"DEV=true"* ]] || return 1
+    [[ "$output" == *"Cleanup complete"* ]] || return 1
+    [[ "$output" != *"Cleanup cancelled"* ]] || return 1
+    [[ "$output" == *"time limit reached, skipped remaining items"* ]] || return 1
+    [[ "$output" != *"OFFICE_SHOULD_NOT_RUN"* ]] || return 1
 }
 
 @test "mo clean summary separates tracked cleanup from free space change" {

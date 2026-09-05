@@ -1188,6 +1188,40 @@ EOF
         "$output" != *"db.sqlite"* ]]
 }
 
+@test "clean_editor_obsolete_extensions reads JSON when plutil -p rejects raw file (#1512)" {
+    local ext_root="$HOME/.vscode/extensions"
+    mkdir -p "$ext_root/pub.ext-old-1.0.0"
+    cat > "$ext_root/.obsolete" << 'JSON'
+{
+  "pub.ext-old-1.0.0": true
+}
+JSON
+
+    local mock_bin="$HOME/bin"
+    mkdir -p "$mock_bin"
+    cat > "$mock_bin/plutil" << 'MOCK'
+#!/bin/bash
+if [[ "$1" == "-p" && "$2" == *"/.obsolete" ]]; then
+    echo "Unexpected character { at line 1" >&2
+    exit 1
+fi
+exec /usr/bin/plutil "$@"
+MOCK
+    chmod +x "$mock_bin/plutil"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" PATH="$mock_bin:$PATH" \
+        /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+safe_clean() { echo "CLEAN:$1"; }
+clean_editor_obsolete_extensions
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CLEAN:$HOME/.vscode/extensions/pub.ext-old-1.0.0"* ]] || return 1
+}
+
 @test "clean_editor_obsolete_extensions removes only dirs listed in .obsolete (#910)" {
     local ext_root="$HOME/.vscode/extensions"
     mkdir -p "$ext_root/pub.ext-old-1.0.0" "$ext_root/pub.ext-new-1.1.0"

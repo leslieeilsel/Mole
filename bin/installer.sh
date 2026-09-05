@@ -822,7 +822,7 @@ main() {
                 export MOLE_DRY_RUN=1
                 ;;
             *)
-                echo "Unknown option: $arg"
+                echo "Unknown option: $arg" >&2
                 exit 1
                 ;;
         esac

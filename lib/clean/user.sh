@@ -55,10 +55,10 @@ clean_trash() {
             local trash_item
             while IFS= read -r -d '' trash_item; do
                 [[ -e "$trash_item" ]] || continue
-                if should_protect_path "$trash_item" 2> /dev/null ||
-                    is_path_whitelisted "$trash_item" 2> /dev/null ||
+                if is_path_whitelisted "$trash_item" 2> /dev/null ||
                     (declare -f holds_compiled_model_cache > /dev/null 2>&1 &&
-                        holds_compiled_model_cache "$trash_item" 2> /dev/null); then
+                        holds_compiled_model_cache "$trash_item" 2> /dev/null) ||
+                    ! validate_path_for_deletion "$trash_item" 2> /dev/null; then
                     continue
                 fi
                 local trash_item_kb
@@ -90,16 +90,26 @@ clean_trash() {
     fi
 
     local cleaned_count=0
+    local skipped_count=0
     while IFS= read -r -d '' item; do
         if safe_remove "$item" true; then
             cleaned_count=$((cleaned_count + 1))
+        else
+            skipped_count=$((skipped_count + 1))
         fi
     done < <(command find "$HOME/.Trash" -mindepth 1 -maxdepth 1 -print0 2> /dev/null || true)
 
     [[ -t 1 ]] && stop_inline_spinner
 
     if [[ $cleaned_count -gt 0 ]]; then
-        echo -e "  ${GREEN}${ICON_SUCCESS}${NC} Trash · emptied, $cleaned_count items"
+        if [[ $skipped_count -gt 0 ]]; then
+            echo -e "  ${YELLOW}${ICON_WARNING}${NC} Trash · removed $cleaned_count items, $skipped_count skipped"
+        else
+            echo -e "  ${GREEN}${ICON_SUCCESS}${NC} Trash · emptied, $cleaned_count items"
+        fi
+        note_activity
+    elif [[ $skipped_count -gt 0 ]]; then
+        echo -e "  ${GRAY}${ICON_WARNING}${NC} Trash · $skipped_count items could not be removed"
         note_activity
     fi
 }
@@ -959,7 +969,10 @@ clean_app_caches() {
     # recoverable user documents, not only disposable cache data.
     safe_clean ~/Library/IdentityCaches/* "Identity caches" || true
     safe_clean ~/Library/Suggestions/* "Siri suggestions cache" || true
-    safe_clean ~/Library/Calendars/Calendar\ Cache "Calendar cache" || true
+    # Do not clean ~/Library/Calendars/Calendar Cache*: CalendarAgent keeps this
+    # SQLite index open in the background. Deleting it while the daemon is
+    # running can crash Calendar.app until logout/login (#1508). Apple treats
+    # this as a manual troubleshooting step, not routine cache maintenance.
     safe_clean ~/Library/Application\ Support/AddressBook/Sources/*/Photos.cache "Address Book photo cache" || true
     clean_support_app_data
 

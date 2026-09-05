@@ -326,8 +326,8 @@ main() {
                 export MOLE_PURGE_INCLUDE_EMPTY=1
                 ;;
             *)
-                echo "Unknown option: $arg"
-                echo "Use 'mo purge --help' for usage information"
+                echo "Unknown option: $arg" >&2
+                echo "Use 'mo purge --help' for usage information" >&2
                 exit 1
                 ;;
         esac

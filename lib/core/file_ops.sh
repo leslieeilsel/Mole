@@ -37,6 +37,14 @@ if [[ -z "${MOLE_TIMEOUTS_LOADED:-}" ]]; then
     source "$_MOLE_CORE_DIR/timeouts.sh"
 fi
 
+# Keep the removal-timeout summary actionable: record which path ran out of
+# budget so the closing note can name it instead of a bare count.
+_mole_record_removal_timeout_path() {
+    local path="$1"
+    MOLE_CLEAN_REMOVAL_TIMEOUT_PATHS="${MOLE_CLEAN_REMOVAL_TIMEOUT_PATHS:+$MOLE_CLEAN_REMOVAL_TIMEOUT_PATHS
+}$path"
+}
+
 # Bound production sudo commands while keeping shell-function mocks observable
 # in tests. Timeout behavior itself must use a PATH stub so it exercises the
 # same external-command branch that users run.
@@ -930,6 +938,24 @@ _mole_is_critical_deletion_path() {
     return 1
 }
 
+# True when path is a direct child of the invoking user's Trash. Emptying Trash
+# is an explicit discard contract: cleanup protection for input methods,
+# keyboards, and similar names still applies to live Library paths, but not to
+# items the user or uninstall already moved into ~/.Trash.
+_mole_is_user_trash_top_level_item() {
+    local path="$1"
+    [[ -n "$path" && "$path" == /* ]] || return 1
+
+    local user_home="${HOME:-}"
+    [[ -n "$user_home" && "$user_home" == /* ]] || return 1
+
+    local policy_path
+    policy_path=$(_mole_normalize_deletion_policy_path "$path")
+
+    local trash_dir="${user_home%/}/.Trash"
+    [[ "${policy_path%/*}" == "$trash_dir" ]]
+}
+
 # Validate path for deletion (absolute, no traversal, not system dir)
 validate_path_for_deletion() {
     local path="$1"
@@ -1131,7 +1157,9 @@ validate_path_for_deletion() {
 
     # Check if path is protected (keychains, system settings, etc)
     if declare -f should_protect_path > /dev/null 2>&1; then
-        if should_protect_path "$policy_path"; then
+        if _mole_is_user_trash_top_level_item "$policy_path"; then
+            :
+        elif should_protect_path "$policy_path"; then
             if [[ "${MO_DEBUG:-0}" == "1" ]]; then
                 log_warning "Path validation: protected path skipped: $policy_path"
             fi
@@ -1548,6 +1576,7 @@ safe_remove() {
             # failed removal, not a user interrupt: count it and keep going so
             # one slow cache never cancels the remaining cleanup.
             MOLE_CLEAN_REMOVAL_TIMEOUTS=$((${MOLE_CLEAN_REMOVAL_TIMEOUTS:-0} + 1))
+            _mole_record_removal_timeout_path "$path"
         fi
         return 124
     fi
@@ -1962,6 +1991,7 @@ safe_sudo_remove() {
         else
             log_operation "${MOLE_CURRENT_COMMAND:-clean}" "FAILED" "$path" "removal timed out"
             MOLE_CLEAN_REMOVAL_TIMEOUTS=$((${MOLE_CLEAN_REMOVAL_TIMEOUTS:-0} + 1))
+            _mole_record_removal_timeout_path "$path"
         fi
         return 124
     fi

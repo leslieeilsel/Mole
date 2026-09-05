@@ -1377,9 +1377,12 @@ EOF
     [[ "$output" != *"already clean"* ]]
 }
 
-@test "clean_xcode_xctest_devices targets only exact XCTestDevices directory" {
+@test "clean_xcode_xctest_devices targets each clone entry, not the root" {
     local developer_root="$HOME/Library/Developer"
-    mkdir -p "$developer_root/XCTestDevices" "$developer_root/XCTestDevices-old"
+    local xctest_root="$developer_root/XCTestDevices"
+    mkdir -p "$xctest_root/11111111-2222-3333-4444-555555555555" \
+        "$xctest_root/66666666-7777-8888-9999-000000000000" \
+        "$developer_root/XCTestDevices-old"
 
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
@@ -1388,12 +1391,23 @@ source "$PROJECT_ROOT/lib/clean/dev.sh"
 note_activity() { :; }
 pgrep() { return 1; }
 _coresimulator_booted_device_state() { return 1; }
-safe_clean() { printf 'SAFE:%s|%s\n' "$1" "$2"; }
+safe_clean() { for target in "$@"; do printf 'SAFE:%s\n' "$target"; done; }
 clean_xcode_xctest_devices
 EOF
 
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"SAFE:$developer_root/XCTestDevices|Xcode XCTestDevices test data"* ]] || return 1
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" == *"SAFE:$HOME/Library/Developer/XCTestDevices/11111111-2222-3333-4444-555555555555"* ]] || return 1
+    [[ "$output" == *"SAFE:$HOME/Library/Developer/XCTestDevices/66666666-7777-8888-9999-000000000000"* ]] || return 1
+    # The root itself is never a deletion target: it stays for Xcode to
+    # recreate clones in, and a root-sized item would outgrow the per-item
+    # removal budget.
+    if printf '%s\n' "$output" | command grep -qx "SAFE:$HOME/Library/Developer/XCTestDevices"; then
+        echo "WRONG: root passed as target"
+        return 1
+    fi
     [[ "$output" != *"XCTestDevices-old"* ]]
 }
 
@@ -1469,6 +1483,38 @@ EOF
     }
     [[ "$output" != *"Xcode XCTestDevices · stopped"* ]] || return 1
     [[ "$output" != *"UNEXPECTED_REMOVE"* ]]
+}
+
+@test "clean_xcode_xctest_devices removal budget applies per clone entry" {
+    local xctest_root="$HOME/PerEntryXCTestDevices"
+    mkdir -p "$xctest_root/11111111-2222-3333-4444-555555555555" \
+        "$xctest_root/66666666-7777-8888-9999-000000000000"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" \
+        MOLE_XCODE_XCTEST_DEVICES_DIR="$xctest_root" MOLE_TEST_NO_AUTH=1 \
+        /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/bin/clean.sh"
+DRY_RUN=false
+note_activity() { :; }
+pgrep() { return 1; }
+_coresimulator_booted_device_state() { return 1; }
+# One sink call per clone: a root-sized single item outgrows the per-item
+# removal budget after deleting only part of it.
+safe_remove() { printf 'REMOVE:%s\n' "$1"; return 0; }
+clean_xcode_xctest_devices
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" == *"REMOVE:$HOME/PerEntryXCTestDevices/11111111-2222-3333-4444-555555555555"* ]] || return 1
+    [[ "$output" == *"REMOVE:$HOME/PerEntryXCTestDevices/66666666-7777-8888-9999-000000000000"* ]] || return 1
+    if printf '%s\n' "$output" | command grep -qx "REMOVE:$HOME/PerEntryXCTestDevices"; then
+        echo "WRONG: root passed as one removal item"
+        return 1
+    fi
 }
 
 @test "clean_xcode_xctest_devices dry-run keeps XCTestDevices directory" {
@@ -2110,7 +2156,7 @@ EOF
     [[ "$output" == *"Developer tools"*"Nothing to clean"* ]]
 }
 
-@test "clean_dev_mobile uses one successful simctl list for probe and data" {
+@test "clean_dev_mobile probes simctl once per question and never twice for one" {
     local call_log="$HOME/simctl-single-list.log"
 
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" DRY_RUN=true \
@@ -2146,8 +2192,28 @@ EOF
         echo "$output"
         return 1
     }
-    [ "$(wc -l < "$call_log" | tr -d ' ')" -eq 1 ] || return 1
-    [ "$(< "$call_log")" = "list devices unavailable" ] || return 1
+    # The unavailable-simulator step still resolves probe and data from a
+    # single call; that is the invariant this test was written for.
+    [ "$(grep -c '^list devices unavailable$' "$call_log" | tr -d ' ')" -eq 1 ] || {
+        cat "$call_log"
+        return 1
+    }
+    [ "$(sed -n 1p "$call_log")" = "list devices unavailable" ] || return 1
+    # The orphaned-runtime review reads two more payloads, and it reads them
+    # through _run_simctl so they stay visible here. Routing around the shared
+    # helper would hide the cost from this assertion rather than remove it.
+    [ "$(sed -n 2p "$call_log")" = "runtime list -j" ] || {
+        cat "$call_log"
+        return 1
+    }
+    [ "$(sed -n 3p "$call_log")" = "list devices -j" ] || {
+        cat "$call_log"
+        return 1
+    }
+    [ "$(wc -l < "$call_log" | tr -d ' ')" -eq 3 ] || {
+        cat "$call_log"
+        return 1
+    }
 }
 
 @test "clean_dev_mobile continues cleanup when simctl is unavailable" {

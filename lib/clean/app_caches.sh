@@ -384,7 +384,8 @@ clean_editor_obsolete_extensions() {
             target="$ext_root/$key"
             [[ -d "$target" ]] || continue
             safe_clean "$target" "Obsolete $editor_label extension"
-        done < <(plutil -p "$obsolete_file" 2> /dev/null |
+        done < <(plutil -convert xml1 -o - "$obsolete_file" 2> /dev/null |
+            plutil -p - 2> /dev/null |
             sed -nE 's/^[[:space:]]*"([^"]+)"[[:space:]]*=>.*/\1/p')
     done
 }

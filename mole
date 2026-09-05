@@ -272,8 +272,8 @@ main() {
                     --force | -f) force_update=true ;;
                     --nightly) nightly_update=true ;;
                     *)
-                        echo "Unknown update option: $arg"
-                        echo "Use 'mole update [--force] [--nightly]' for supported options."
+                        echo "Unknown update option: $arg" >&2
+                        echo "Use 'mole update [--force] [--nightly]' for supported options." >&2
                         exit 1
                         ;;
                 esac
@@ -287,8 +287,8 @@ main() {
                 case "$arg" in
                     "--dry-run" | "-n") dry_run_remove=true ;;
                     *)
-                        echo "Unknown remove option: $arg"
-                        echo "Use 'mole remove [--dry-run]' for supported options."
+                        echo "Unknown remove option: $arg" >&2
+                        echo "Use 'mole remove [--dry-run]' for supported options." >&2
                         exit 1
                         ;;
                 esac
@@ -308,8 +308,10 @@ main() {
             interactive_main_menu
             ;;
         *)
-            echo "Unknown command: ${args[0]}"
-            echo "Use 'mole --help' for usage information."
+            # Errors belong on stderr so `mo $cmd > out` leaves the diagnostic
+            # visible instead of burying it in the redirected file.
+            echo "Unknown command: ${args[0]}" >&2
+            echo "Use 'mole --help' for usage information." >&2
             exit 1
             ;;
     esac

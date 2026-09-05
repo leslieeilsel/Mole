@@ -49,6 +49,16 @@ setup() {
 	[ "$status" -eq 0 ]
 }
 
+@test "check workflow pins the shfmt version" {
+	local workflow="$PROJECT_ROOT/.github/workflows/check.yml"
+
+	run grep -F "go install mvdan.cc/sh/v3/cmd/shfmt@v3.13.1" "$workflow"
+	[ "$status" -eq 0 ] || return 1
+
+	run grep -E "brew install .*shfmt" "$workflow"
+	[ "$status" -ne 0 ] || return 1
+}
+
 @test "diagnostic guidance check rejects equivalent pipe-to-shell spellings across lines" {
 	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
 set -euo pipefail

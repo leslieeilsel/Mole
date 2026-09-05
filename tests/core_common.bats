@@ -246,6 +246,19 @@ EOF
     [ "$result" = "unprotected" ]
 }
 
+@test "should_protect_path protects Calendar data and cache paths (#1508)" {
+    local path result
+    for path in \
+        "$HOME/Library/Calendars" \
+        "$HOME/Library/Calendars/Calendar Cache" \
+        "$HOME/Library/Calendars/Calendar Cache-shm" \
+        "$HOME/Library/Calendars/Calendar Cache-wal" \
+        "$HOME/Library/Calendars/01234567-89AB-CDEF-0123-456789ABCDEF"; do
+        result=$(HOME="$HOME" TARGET_PATH="$path" /bin/bash --noprofile --norc -c 'source "$PROJECT_ROOT/lib/core/common.sh"; should_protect_path "$TARGET_PATH" && echo protected || echo unprotected')
+        [ "$result" = "protected" ] || return 1
+    done
+}
+
 @test "xcode_build_tooling_process_state recognizes command-line build owners" {
     run env PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
 set -euo pipefail

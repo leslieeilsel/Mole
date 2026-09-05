@@ -211,8 +211,8 @@ main() {
                 exit 0
                 ;;
             *)
-                echo "Unknown optimize option: $arg"
-                echo "Use 'mo optimize --help' for supported options."
+                echo "Unknown optimize option: $arg" >&2
+                echo "Use 'mo optimize --help' for supported options." >&2
                 exit 1
                 ;;
         esac
